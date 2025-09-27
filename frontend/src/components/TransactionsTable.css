@@ -1,0 +1,108 @@
+.table-container {
+  margin-top: 0;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text);
+  width: 97%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+table {
+  width: 98%;
+  max-width: 98%;
+  border-collapse: collapse;
+  font-size: 14px;
+  background: transparent;
+  color: var(--text);
+  table-layout: fixed; /* Ensures table respects column widths */
+  margin: 0 auto;
+}
+
+th, td {
+  padding: 6px 4px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-wrap: break-word;
+}
+
+/* Set specific widths for each column */
+th:first-child, td:first-child {
+  width: 16%; /* Date column */
+  padding-right: 2px;
+}
+
+th:nth-child(2), td:nth-child(2) {
+  width: 30%; /* Description column */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 2px;
+}
+
+th:nth-child(3), td:nth-child(3) {
+  width: 24%; /* Category column */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 2px;
+}
+
+th:last-child, td:last-child {
+  width: 12%; /* Amount column */
+  text-align: right;
+  padding-right: 0;
+}
+
+th {
+  background: var(--table-header);
+  color: var(--text);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  letter-spacing: 0.5px;
+  padding: 6px 4px;
+  border-bottom: 2px solid #eee;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  table {
+    font-size: 12px;
+    width: 96%;
+  }
+  
+  th, td {
+    padding: 4px 2px;
+  }
+  
+  th:first-child, td:first-child {
+    width: 18%;
+    padding-right: 1px;
+  }
+  
+  th:nth-child(2), td:nth-child(2) {
+    width: 34%;
+    padding-right: 1px;
+  }
+  
+  th:nth-child(3), td:nth-child(3) {
+    width: 24%;
+    padding-right: 1px;
+  }
+  
+  th:last-child, td:last-child {
+    width: 12%;
+    padding-right: 0;
+  }
+  
+  th {
+    padding: 4px 2px;
+    font-size: 0.7rem;
+  }
+}

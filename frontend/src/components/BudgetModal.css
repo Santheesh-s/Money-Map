@@ -1,0 +1,274 @@
+/* BudgetModal.css - Styles for budget modal component */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.budget-modal {
+  background: var(--dashboard-card, #fff);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  width: 90%;
+  max-width: 500px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--dashboard-border, #e0e0e0);
+}
+
+.modal-header h3 {
+  margin: 0;
+  color: var(--dashboard-text, #222);
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: var(--dashboard-text, #666);
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: background-color 0.2s;
+}
+
+.close-btn:hover {
+  background: var(--dashboard-border, #f0f0f0);
+}
+
+.budget-form {
+  padding: 24px;
+}
+
+.error-message {
+  background: #ffebee;
+  color: #c62828;
+  padding: 12px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  font-size: 0.9rem;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--dashboard-text, #333);
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.radio-group {
+  display: flex;
+  gap: 20px;
+  margin-top: 8px;
+}
+
+.radio-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: normal;
+  margin-bottom: 0;
+}
+
+.radio-label input[type="radio"] {
+  margin: 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: normal;
+  margin-bottom: 0;
+}
+
+.checkbox-label input[type="checkbox"] {
+  margin: 0;
+}
+
+.form-group input,
+.form-group select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--dashboard-border, #ddd);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  background: var(--dashboard-card, #fff);
+  color: var(--dashboard-text, #222);
+  transition: border-color 0.2s;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+  outline: none;
+  border-color: #1976d2;
+  box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.1);
+}
+
+.amount-input {
+  display: flex;
+  gap: 8px;
+}
+
+.amount-input input {
+  flex: 1;
+}
+
+.amount-input select {
+  width: 100px;
+}
+
+.form-group small {
+  display: block;
+  margin-top: 4px;
+  color: var(--dashboard-text, #666);
+  font-size: 0.8rem;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--dashboard-border, #e0e0e0);
+}
+
+.cancel-btn,
+.save-btn {
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+
+.cancel-btn {
+  background: var(--dashboard-border, #f5f5f5);
+  color: var(--dashboard-text, #666);
+}
+
+.cancel-btn:hover {
+  background: var(--dashboard-border, #e0e0e0);
+}
+
+.save-btn {
+  background: #1976d2;
+  color: white;
+}
+
+.save-btn:hover:not(:disabled) {
+  background: #1565c0;
+}
+
+.save-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+/* Dark theme support */
+[data-theme="dark"] .budget-modal {
+  background: var(--dashboard-card, #23272b);
+  border-color: var(--dashboard-border, #333);
+}
+
+[data-theme="dark"] .modal-header {
+  border-color: var(--dashboard-border, #333);
+}
+
+[data-theme="dark"] .modal-header h3 {
+  color: var(--dashboard-text, #f5f5f5);
+}
+
+[data-theme="dark"] .close-btn {
+  color: var(--dashboard-text, #aaa);
+}
+
+[data-theme="dark"] .close-btn:hover {
+  background: var(--dashboard-border, #333);
+}
+
+[data-theme="dark"] .form-group label {
+  color: var(--dashboard-text, #ccc);
+}
+
+[data-theme="dark"] .form-group input,
+[data-theme="dark"] .form-group select {
+  background: var(--dashboard-card, #23272b);
+  border-color: var(--dashboard-border, #333);
+  color: var(--dashboard-text, #f5f5f5);
+}
+
+[data-theme="dark"] .form-group small {
+  color: var(--dashboard-text, #aaa);
+}
+
+[data-theme="dark"] .modal-actions {
+  border-color: var(--dashboard-border, #333);
+}
+
+[data-theme="dark"] .cancel-btn {
+  background: var(--dashboard-border, #333);
+  color: var(--dashboard-text, #aaa);
+}
+
+[data-theme="dark"] .cancel-btn:hover {
+  background: var(--dashboard-border, #444);
+}
+
+/* Responsive design */
+@media (max-width: 600px) {
+  .budget-modal {
+    width: 95%;
+    margin: 20px;
+  }
+  
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+  
+  .radio-group {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .modal-actions {
+    flex-direction: column;
+  }
+}

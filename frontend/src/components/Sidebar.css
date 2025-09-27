@@ -1,0 +1,17 @@
+.sidebar .sidebar-link:hover {
+	background: rgba(25, 118, 210, 0.12);
+	color: #1976d2;
+	text-decoration: none;
+}
+
+.sidebar .sidebar-link {
+	padding: 8px 10px;
+	border-radius: 6px;
+	transition: background 0.2s, color 0.2s;
+}
+
+[data-theme="dark"] .sidebar .sidebar-link:hover {
+	background: rgba(76, 175, 80, 0.16);
+	color: #90caf9;
+}
+
