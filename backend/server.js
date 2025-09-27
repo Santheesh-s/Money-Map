@@ -35,6 +35,7 @@ app.get('/', (req, res) => {
   res.send('Backend is working!');
 });
 
+// API routes first
 const transactionRoutes = require('./routes/transactionRoutes');
 app.use('/transactions', transactionRoutes);
 
@@ -57,7 +58,7 @@ app.use('/budgets', budgetRoutes);
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../frontend/build')));
   
-  // Handle React routing, return all requests to React app
+  // Handle React routing, return all requests to React app (catch-all route)
   app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
   });
