@@ -5,6 +5,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { FaPlus, FaHistory, FaChartPie, FaFileUpload, FaCog, FaUser, FaWallet, FaMoneyBillWave } from 'react-icons/fa';
 import { FaSignOutAlt } from 'react-icons/fa';
+import axios from '../utils/axios';
 import './Sidebar.css';
 
 
@@ -54,12 +55,16 @@ const Sidebar = () => {
         <div style={{ marginTop: 20, marginBottom: 40, textAlign: 'center' }}>
           <button
             onClick={async () => {
-              await fetch('http://localhost:5000/auth/logout', {
-                method: 'POST',
-                credentials: 'include',
-              });
-              window.location.href = '/auth';
-              setOpen(false);
+              try {
+                await axios.post('/auth/logout');
+                window.location.href = '/auth';
+                setOpen(false);
+              } catch (error) {
+                console.error('Logout failed:', error);
+                // Still redirect even if logout fails
+                window.location.href = '/auth';
+                setOpen(false);
+              }
             }}
             style={{
               background: '#dc3545',

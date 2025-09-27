@@ -22,7 +22,7 @@ const AuthPage = () => {
     const endpoint = isLogin ? '/auth/login' : '/auth/register';
 
     try {
-      await axios.post(`http://localhost:5000${endpoint}`, form, { withCredentials: true });
+      await axios.post(endpoint, form, { withCredentials: true });
       navigate('/dashboard');
     } catch (err) {
       alert(err.response?.data?.message || 'Auth failed');

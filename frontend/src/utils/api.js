@@ -40,7 +40,7 @@ api.interceptors.response.use(
       try {
         // Try to refresh the token
         const response = await axios.post(
-          'http://localhost:5000/api/auth/refresh-token',
+          `${API_BASE_URL}/auth/refresh-token`,
           {},
           { withCredentials: true }
         );

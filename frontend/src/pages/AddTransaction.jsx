@@ -30,7 +30,7 @@ const AddTransaction = () => {
     };
 
     try {
-      await axios.post('http://localhost:5000/transactions', payload);
+      await axios.post('/transactions', payload);
       alert('Transaction added successfully!');
       setFormData({ ...formData, amount: '', category: '', description: '', tags: '' });
     } catch (err) {
