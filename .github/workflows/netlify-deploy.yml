@@ -1,4 +1,4 @@
-name: Build & Deploy Money-Map to Netlify (CI-only edits)
+name: Build & Deploy Money-Map to Netlify (CI-only edits, heredoc-free)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
 
 env:
   NODE_VERSION: 18
-  # Set to "true" to stub OCR endpoints in CI (if your project uses native binaries)
+  # Set to "true" to stub OCR endpoints in CI if native binaries are used
   STUB_OCR: "false"
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
             npm run build
             cd -
           else
-            echo "No frontend build to run."
+            echo "No frontend build found; skipping"
           fi
 
       - name: Prepare out/ and copy backend + frontend build
@@ -78,86 +78,56 @@ jobs:
             ENTRY="server.js"
           fi
           echo "Detected entry: $ENTRY"
-          echo "::set-output name=entry::$ENTRY"
+          # Set output in the modern way
+          echo "entry=$ENTRY" >> "$GITHUB_OUTPUT"
 
-      - name: Patch copied backend to be serverless-safe (sed-based, no heredoc)
+      - name: Patch copied backend to be serverless-safe (no heredocs)
         env:
           ENTRY: ${{ steps.detect-entry.outputs.entry }}
           STUB_OCR: ${{ env.STUB_OCR }}
         run: |
           set -e
-          ENTRY_PATH="out/backend/$ENTRY"
-          echo "Patching $ENTRY_PATH"
+          ENTRY_PATH="out/backend/${ENTRY}"
+          echo "Patching ${ENTRY_PATH}"
 
-          if [ ! -f "$ENTRY_PATH" ]; then
-            echo "Entry file not found: $ENTRY_PATH" >&2
+          if [ ! -f "${ENTRY_PATH}" ]; then
+            echo "Entry file not found: ${ENTRY_PATH}" >&2
             exit 1
           fi
 
-          # 1) Remove lines that call scheduleBudgetChecks(...) (simple heuristic)
-          if grep -q "scheduleBudgetChecks" "$ENTRY_PATH"; then
-            echo "Removing scheduleBudgetChecks() calls"
-            # delete lines that contain scheduleBudgetChecks(...)
-            sed -i.bak '/scheduleBudgetChecks\s*(/I d' "$ENTRY_PATH" || true
+          # 1) Remove lines that call scheduleBudgetChecks(...) (heuristic)
+          if grep -qi "scheduleBudgetChecks" "${ENTRY_PATH}"; then
+            echo "Removing scheduleBudgetChecks() lines"
+            # Remove any line that contains scheduleBudgetChecks(
+            sed -i.bak '/scheduleBudgetChecks\s*(/I d' "${ENTRY_PATH}" || true
           else
-            echo "No scheduleBudgetChecks occurrences found"
+            echo "No scheduleBudgetChecks occurrences"
           fi
 
-          # 2) Remove app.listen(...) occurrences (basic removal)
-          if grep -qi "app.listen" "$ENTRY_PATH"; then
-            echo "Removing app.listen(...) occurrences"
-            # remove lines containing app.listen( ... );
-            # this is a simple heuristic; remove lines with 'app.listen'
-            sed -i.bak '/app\.listen\s*(/I d' "$ENTRY_PATH" || true
+          # 2) Remove app.listen(...) occurrences (heuristic)
+          if grep -qi "app.listen" "${ENTRY_PATH}"; then
+            echo "Removing app.listen(...) lines"
+            sed -i.bak '/app\.listen\s*(/I d' "${ENTRY_PATH}" || true
           else
-            echo "No app.listen occurrences found"
+            echo "No app.listen occurrences"
           fi
 
           # 3) Ensure module.exports = app exists (append if missing)
-          if ! grep -q "module\\.exports\\s*=\\s*app" "$ENTRY_PATH"; then
-            echo -e "\n// CI appended: export app for serverless wrapper\ntry { if (typeof module !== 'undefined') module.exports = app; } catch(e) {}" >> "$ENTRY_PATH"
+          if ! grep -q "module\\.exports\\s*=\\s*app" "${ENTRY_PATH}"; then
+            printf "\n// CI appended: export app for serverless wrapper\ntry { if (typeof module !== 'undefined') module.exports = app; } catch(e) {}\n" >> "${ENTRY_PATH}"
             echo "App export appended."
           else
             echo "module.exports = app already present."
           fi
 
-          # 4) Append require.main guard at EOF that runs schedule/listen when run directly
-          # We'll append guarded calls that attempt to call scheduleBudgetChecks() and start the listener
-          cat >> "$ENTRY_PATH" <<'EOF'
-
-// CI appended: start server and background jobs only when run directly
-try {
-  if (require.main === module) {
-    // Call scheduleBudgetChecks if present
-    try { if (typeof scheduleBudgetChecks === 'function') scheduleBudgetChecks(); } catch(e) { /* ignore */ }
-
-    // Start server with default port if app is set and not already listening
-    try {
-      const port = process.env.PORT || 3000;
-      if (app && app.listen) {
-        app.listen(port, () => { console.log('Server started (CI guard) on port', port); });
-      }
-    } catch(e) { /* ignore */ }
-  }
-} catch(e) { /* ignore */ }
-
-EOF
-
-          echo "Appended require.main guard to $ENTRY_PATH"
+          # 4) Append require.main guard at EOF that runs schedule/listen only when run directly
+          printf "\n// CI appended: start server and background jobs only when run directly\ntry {\n  if (require.main === module) {\n    try { if (typeof scheduleBudgetChecks === 'function') scheduleBudgetChecks(); } catch(e) { /* ignore */ }\n    try {\n      const port = process.env.PORT || 3000;\n      if (app && app.listen) {\n        app.listen(port, () => { console.log('Server started (CI guard) on port', port); });\n      }\n    } catch(e) { /* ignore */ }\n  }\n} catch(e) { /* ignore */ }\n" >> "${ENTRY_PATH}"
+          echo "Appended require.main guard to ${ENTRY_PATH}"
 
           # 5) Optionally stub OCR/native endpoints if STUB_OCR=true
           if [ "${STUB_OCR}" = "true" ]; then
-            echo "STUB_OCR=true: adding OCR stub endpoints to out/backend"
-            cat >> "$ENTRY_PATH" <<'EOF'
-
-// CI appended: stub OCR endpoints (native binaries not available in Netlify functions)
-try {
-  if (app && app.post) {
-    try { app.post('/api/uploadPdf', (req, res) => res.status(501).json({ error: 'OCR disabled in serverless deploy' })); } catch(e) {}
-    try { app.post('/api/ocr', (req, res) => res.status(501).json({ error: 'OCR disabled in serverless deploy' })); } catch(e) {}
-  }
-} catch(e) {}
-EOF
+            echo "STUB_OCR=true: appending OCR stubs"
+            printf "\n// CI appended: stub OCR endpoints (native binaries not available)\ntry {\n  if (app && app.post) {\n    try { app.post('/api/uploadPdf', (req, res) => res.status(501).json({ error: 'OCR disabled in serverless deploy' })); } catch(e) {}\n    try { app.post('/api/ocr', (req, res) => res.status(501).json({ error: 'OCR disabled in serverless deploy' })); } catch(e) {}\n  }\n} catch(e) {}\n" >> "${ENTRY_PATH}"
             echo "OCR stubs appended."
           fi
 
@@ -166,41 +136,44 @@ EOF
           ENTRY: ${{ steps.detect-entry.outputs.entry }}
         run: |
           set -e
-          # create wrapper that requires out/backend/<entry> (without .js extension)
           REQ=$(echo "out/backend/${ENTRY}" | sed 's|^out/||' | sed 's|\.js$||')
           mkdir -p out/functions
           echo "const serverless = require('serverless-http');" > out/functions/server.js
           echo "let app = require('../${REQ}');" >> out/functions/server.js
           echo "if (typeof app === 'function' && !app.use) app = app();" >> out/functions/server.js
           echo "module.exports.handler = serverless(app);" >> out/functions/server.js
-          echo "Created out/functions/server.js"
+          echo "Created out/functions/server.js requiring ../${REQ}"
 
       - name: Build merged out/package.json from backend/package.json
         run: |
           set -e
-          # create out/package.json merging backend dependencies; fallback to empty deps if none
-          node -e "
-const fs=require('fs');
-const path=require('path');
-const outPkg={
-  name:'money-map-netlify-out',
-  private:true,
-  version:'1.0.0',
-  engines:{node:'18.x'},
-  dependencies:{},
-  devDependencies:{}
+          node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const outPkg = {
+  name: 'money-map-netlify-out',
+  private: true,
+  version: '1.0.0',
+  engines: { node: '18.x' },
+  dependencies: {},
+  devDependencies: {}
 };
-const backendPkgPath=path.join('out','backend','package.json');
+const backendPkgPath = path.join('out','backend','package.json');
 if (fs.existsSync(backendPkgPath)) {
   try {
-    const backendPkg=JSON.parse(fs.readFileSync(backendPkgPath,'utf8'));
+    const backendPkg = JSON.parse(fs.readFileSync(backendPkgPath,'utf8'));
     if (backendPkg.dependencies) Object.assign(outPkg.dependencies, backendPkg.dependencies);
     if (backendPkg.devDependencies) Object.assign(outPkg.devDependencies, backendPkg.devDependencies);
-  } catch(e){ console.warn('Failed to parse backend package.json', e.message); }
+  } catch(e) {
+    console.warn('Failed to parse backend package.json:', e.message);
+  }
+} else {
+  console.warn('out/backend/package.json not found; no backend dependencies merged.');
 }
-outPkg.dependencies['serverless-http']='^3.0.0';
-fs.writeFileSync('out/package.json', JSON.stringify(outPkg,null,2));
-console.log('Wrote out/package.json');"
+outPkg.dependencies['serverless-http'] = '^3.0.0';
+fs.writeFileSync(path.join('out','package.json'), JSON.stringify(outPkg, null, 2));
+console.log('Wrote out/package.json');
+NODE
 
       - name: Install dependencies in out/
         run: |
@@ -212,7 +185,7 @@ console.log('Wrote out/package.json');"
             npm install --production --no-audit --progress=false
           fi
 
-      - name: Install netlify-cli
+      - name: Install netlify-cli (global)
         run: |
           npm install -g netlify-cli
 
@@ -229,3 +202,4 @@ console.log('Wrote out/package.json');"
             --dir out/publish \
             --functions out/functions \
             --prod
+            
