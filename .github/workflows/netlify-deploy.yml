@@ -1,4 +1,4 @@
-name: Build & Deploy Money-Map to Netlify (CI-only edits, heredoc-free)
+name: Deploy backend to Netlify Functions (CI-only edits)
 
 on:
   push:
@@ -6,14 +6,14 @@ on:
 
 env:
   NODE_VERSION: 18
-  # Set to "true" to stub OCR endpoints if native binaries are used
+  # If your backend uses native binaries (pdf-poppler, tesseract), set STUB_OCR to "true"
   STUB_OCR: "false"
 
 jobs:
-  build-and-deploy:
+  deploy-backend:
     runs-on: ubuntu-latest
     concurrency:
-      group: money-map-netlify-deploy
+      group: money-map-netlify-backend
       cancel-in-progress: true
 
     steps:
@@ -25,35 +25,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Build frontend (if present)
-        run: |
-          set -e
-          if [ -d frontend ] && [ -f frontend/package.json ]; then
-            echo "Building frontend..."
-            cd frontend
-            npm ci
-            npm run build
-            cd -
-          else
-            echo "No frontend build found; skipping"
-          fi
-
-      - name: Prepare out/ and copy backend + frontend build
+      - name: Prepare out/ and copy backend
         run: |
           set -e
           rm -rf out
-          mkdir -p out/publish out/functions out/backend
-
-          if [ -d frontend/build ]; then
-            cp -r frontend/build/* out/publish/ || true
-            echo "Copied frontend/build -> out/publish"
-          elif [ -d frontend/dist ]; then
-            cp -r frontend/dist/* out/publish/ || true
-            echo "Copied frontend/dist -> out/publish"
-          else
-            echo "No frontend build found"
-          fi
-
+          mkdir -p out/functions out/backend out/publish
+          # copy entire backend into out/backend (CI-only edits will modify this copy)
           if [ -d backend ]; then
             cp -r backend/* out/backend/
             echo "Copied backend -> out/backend"
@@ -61,6 +38,8 @@ jobs:
             echo "ERROR: backend folder not found" >&2
             exit 1
           fi
+          # ensure publish exists (Netlify CLI requires --dir)
+          mkdir -p out/publish
 
       - name: Detect backend entry file
         id: detect-entry
@@ -77,7 +56,6 @@ jobs:
           if [ -z "$ENTRY" ]; then
             ENTRY="server.js"
           fi
-          echo "Detected entry: $ENTRY"
           echo "entry=$ENTRY" >> "$GITHUB_OUTPUT"
 
       - name: Patch copied backend to be serverless-safe (no heredocs)
@@ -94,37 +72,30 @@ jobs:
             exit 1
           fi
 
-          # 1) Remove lines that call scheduleBudgetChecks(...) (heuristic)
+          # Remove scheduleBudgetChecks(...) lines if present
           if grep -qi "scheduleBudgetChecks" "${ENTRY_PATH}"; then
             echo "Removing scheduleBudgetChecks() lines"
             sed -i.bak '/scheduleBudgetChecks\s*(/I d' "${ENTRY_PATH}" || true
-          else
-            echo "No scheduleBudgetChecks occurrences"
           fi
 
-          # 2) Remove app.listen(...) occurrences (heuristic)
+          # Remove app.listen(...) occurrences
           if grep -qi "app.listen" "${ENTRY_PATH}"; then
             echo "Removing app.listen(...) lines"
             sed -i.bak '/app\.listen\s*(/I d' "${ENTRY_PATH}" || true
-          else
-            echo "No app.listen occurrences"
           fi
 
-          # 3) Ensure module.exports = app exists (append if missing)
+          # Append module.exports = app if missing
           if ! grep -q "module\\.exports\\s*=\\s*app" "${ENTRY_PATH}"; then
             printf "\n// CI appended: export app for serverless wrapper\ntry { if (typeof module !== 'undefined') module.exports = app; } catch(e) {}\n" >> "${ENTRY_PATH}"
             echo "App export appended."
-          else
-            echo "module.exports = app already present."
           fi
 
-          # 4) Append require.main guard at EOF that runs schedule/listen only when run directly
-          printf "\n// CI appended: start server and background jobs only when run directly\ntry {\n  if (require.main === module) {\n    try { if (typeof scheduleBudgetChecks === 'function') scheduleBudgetChecks(); } catch(e) { /* ignore */ }\n    try {\n      const port = process.env.PORT || 3000;\n      if (app && app.listen) {\n        app.listen(port, () => { console.log('Server started (CI guard) on port', port); });\n      }\n    } catch(e) { /* ignore */ }\n  }\n} catch(e) { /* ignore */ }\n" >> "${ENTRY_PATH}"
+          # Append require.main guard at EOF to run schedule/listen when run directly
+          printf "\n// CI appended: start server and background jobs only when run directly\ntry {\n  if (require.main === module) {\n    try { if (typeof scheduleBudgetChecks === 'function') scheduleBudgetChecks(); } catch(e) {}\n    try {\n      const port = process.env.PORT || 3000;\n      if (app && app.listen) {\n        app.listen(port, () => { console.log('Server started (CI guard) on port', port); });\n      }\n    } catch(e) {}\n  }\n} catch(e) {}\n" >> "${ENTRY_PATH}"
           echo "Appended require.main guard to ${ENTRY_PATH}"
 
-          # 5) Optionally stub OCR/native endpoints if STUB_OCR=true
+          # Optionally stub OCR/native endpoints
           if [ "${STUB_OCR}" = "true" ]; then
-            echo "STUB_OCR=true: appending OCR stubs"
             printf "\n// CI appended: stub OCR endpoints (native binaries not available)\ntry {\n  if (app && app.post) {\n    try { app.post('/api/uploadPdf', (req, res) => res.status(501).json({ error: 'OCR disabled in serverless deploy' })); } catch(e) {}\n    try { app.post('/api/ocr', (req, res) => res.status(501).json({ error: 'OCR disabled in serverless deploy' })); } catch(e) {}\n  }\n} catch(e) {}\n" >> "${ENTRY_PATH}"
             echo "OCR stubs appended."
           fi
@@ -142,14 +113,10 @@ jobs:
           echo "module.exports.handler = serverless(app);" >> out/functions/server.js
           echo "Created out/functions/server.js requiring ../${REQ}"
 
-      - name: Build merged out/package.json from backend/package.json (heredoc-free)
+      - name: Create out/package.json merging backend deps
         run: |
           set -e
-          # create a temporary JS file that will write out/package.json (no heredoc in YAML)
-          TMPFILE="$(mktemp)"
-          printf "const fs=require('fs');\nconst path=require('path');\nconst outPkg={name:'money-map-netlify-out',private:true,version:'1.0.0',engines:{node:'18.x'},dependencies:{},devDependencies:{}};\nconst backendPkgPath=path.join('out','backend','package.json');\nif (fs.existsSync(backendPkgPath)){\n  try{const backendPkg=JSON.parse(fs.readFileSync(backendPkgPath,'utf8'));\n    if(backendPkg.dependencies) Object.assign(outPkg.dependencies, backendPkg.dependencies);\n    if(backendPkg.devDependencies) Object.assign(outPkg.devDependencies, backendPkg.devDependencies);\n  }catch(e){console.warn('Failed to parse backend package.json',e.message)}\n} else { console.warn('out/backend/package.json not found'); }\noutPkg.dependencies['serverless-http']='^3.0.0';\nfs.writeFileSync(path.join('out','package.json'), JSON.stringify(outPkg,null,2));\nconsole.log('Wrote out/package.json');\n" > "$TMPFILE"
-          node "$TMPFILE"
-          rm -f "$TMPFILE"
+          node -e "const fs=require('fs'),path=require('path');const outPkg={name:'money-map-netlify-out',private:true,version:'1.0.0',engines:{node:'18.x'},dependencies:{},devDependencies:{}};const bp=path.join('out','backend','package.json');if(fs.existsSync(bp)){try{const b=JSON.parse(fs.readFileSync(bp,'utf8'));if(b.dependencies)Object.assign(outPkg.dependencies,b.dependencies);if(b.devDependencies)Object.assign(outPkg.devDependencies,b.devDependencies);}catch(e){console.warn('parse backend package.json failed',e.message);} } outPkg.dependencies['serverless-http']='^3.0.0';fs.writeFileSync(path.join('out','package.json'),JSON.stringify(outPkg,null,2));console.log('Wrote out/package.json');"
 
       - name: Install dependencies in out/
         run: |
@@ -165,12 +132,13 @@ jobs:
         run: |
           npm install -g netlify-cli
 
-      - name: Deploy to Netlify (publish + functions)
+      - name: Deploy functions to Netlify
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
         run: |
           set -e
+          # ensure publish exists (Netlify CLI requires dir)
           if [ ! -d out/publish ]; then mkdir -p out/publish; fi
           netlify deploy \
             --site "$NETLIFY_SITE_ID" \
