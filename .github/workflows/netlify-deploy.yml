@@ -5,15 +5,18 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
-  id-token: write
+env:
+  NODE_VERSION: 18
+  # If you want OCR endpoints stubbed (because they require native binaries),
+  # set STUB_OCR to "true" in the workflow run or as an environment secret.
+  STUB_OCR: "false"
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      NODE_VERSION: 18
+    concurrency:
+      group: money-map-netlify-deploy
+      cancel-in-progress: true
 
     steps:
       - name: Checkout repository
@@ -25,9 +28,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      - name: Build frontend
+      - name: Build frontend (if present)
         run: |
-          set -e
           if [ -d frontend ] && [ -f frontend/package.json ]; then
             echo "Building frontend..."
             cd frontend
@@ -35,203 +37,260 @@ jobs:
             npm run build
             cd -
           else
-            echo "frontend folder/package.json not found; skipping frontend build"
+            echo "No frontend folder found or package.json missing, skipping frontend build."
           fi
 
-      - name: Prepare out/ bundle (publish + functions) and copy backend
+      - name: Prepare out/ directory and copy project pieces
         run: |
           set -e
-          OUT=out
-          FUNCTIONS="$OUT/functions"
-          PUBLISH="$OUT/publish"
+          rm -rf out
+          mkdir -p out/publish
+          mkdir -p out/functions
 
-          rm -rf "$OUT"
-          mkdir -p "$FUNCTIONS"
-          mkdir -p "$PUBLISH"
-
-          # Copy frontend build to publish/
+          # copy frontend build if present
           if [ -d frontend/build ]; then
-            cp -r frontend/build/* "$PUBLISH/"
+            cp -r frontend/build/* out/publish/
+            echo "Copied frontend/build -> out/publish"
           elif [ -d frontend/dist ]; then
-            cp -r frontend/dist/* "$PUBLISH/"
+            cp -r frontend/dist/* out/publish/
+            echo "Copied frontend/dist -> out/publish"
           else
-            echo "No frontend/build or frontend/dist found; publish will be empty"
+            echo "No frontend build found; out/publish will be empty"
           fi
 
-          # Copy backend to out/backend (we will only modify the copy)
+          # copy backend for CI-only edits
           if [ -d backend ]; then
-            cp -r backend "$OUT/backend"
+            cp -r backend out/backend
+            echo "Copied backend -> out/backend"
           else
-            echo "ERROR: backend folder not found in repo; aborting"
+            echo "ERROR: backend folder not found in repo"
             exit 1
           fi
 
-          # Detect backend entry (common candidates) inside the copied out/backend
-          ENTRY=""
-          for cand in backend/app.js backend/index.js backend/server.js backend/src/index.js; do
-            if [ -f "$OUT/$cand" ]; then
-              ENTRY="$cand"
-              break
-            fi
-          done
-
-          if [ -z "$ENTRY" ]; then
-            echo "Could not detect backend entry automatically. Defaulting to backend/server.js"
-            ENTRY="backend/server.js"
-          fi
-          echo "Detected backend entry: $ENTRY"
-
-          # --------------- modify copied backend/server.js (only in out/) to be serverless-friendly ---------------
-          # We'll:
-          #  - wrap scheduleBudgetChecks() and app.listen(...) inside `if (require.main === module) { ... }`
-          #  - export app: module.exports = app;
-          #
-          # We do this with a Node script that edits the file robustly.
-
+      - name: Patch copied backend for serverless (safe edits)
+        env:
+          STUB_OCR: ${{ env.STUB_OCR }}
+        run: |
+          set -e
+          # Node script will:
+          # - find backend entry (common candidates)
+          # - remove/apply guards for scheduleBudgetChecks() and app.listen(...)
+          # - append module.exports = app if missing
+          # - optionally stub routes that call native binaries (if STUB_OCR=true)
           node - <<'NODE'
 const fs = require('fs');
 const path = require('path');
 
 const outRoot = path.resolve('out');
-const candidates = [
-  'backend/app.js',
-  'backend/index.js',
-  'backend/server.js',
-  'backend/src/index.js'
-];
-let found = null;
-for (const c of candidates) {
-  const p = path.join(outRoot, c);
-  if (fs.existsSync(p)) { found = p; break; }
-}
-if (!found) {
-  // fallback to server.js path
-  found = path.join(outRoot, 'backend', 'server.js');
-}
-console.log('Modifying backend entry at:', found);
-if (!fs.existsSync(found)) {
-  console.error('Backend entry not found at expected path:', found);
+const backendRoot = path.join(outRoot, 'backend');
+
+if (!fs.existsSync(backendRoot)) {
+  console.error('out/backend not found');
   process.exit(1);
 }
-let src = fs.readFileSync(found, 'utf8');
 
-// If file already exports app or has require.main guard, skip heavy edits
-if (src.includes('module.exports') && src.includes('require.main')) {
-  console.log('Backend entry already has module.exports and require.main guard; minimal edits only.');
-} else {
-  // 1) Ensure we export `app` at end.
-  if (!/module\.exports\s*=\s*app/.test(src)) {
-    // Add export at the end but before any trailing comments
-    src = src + '\n\n// Export app for serverless wrapper\nif (typeof module !== "undefined") module.exports = app;\n';
-    console.log('App export appended.');
-  }
+const candidates = [
+  'app.js',
+  'index.js',
+  'server.js',
+  path.join('src','index.js'),
+  path.join('src','app.js'),
+];
 
-  // 2) Wrap scheduleBudgetChecks() and app.listen(...) inside require.main guard if present
-  // Find scheduleBudgetChecks() calls (common pattern) and replace them with a placeholder to move inside guard.
-  const sbRegex = /([^\n]*scheduleBudgetChecks\([^)]*\);?)/g;
-  let sbMatches = src.match(sbRegex);
-  let sbBlock = '';
-  if (sbMatches) {
-    sbBlock = sbMatches.join('\n');
-    src = src.replace(sbRegex, '');
-    console.log('Removed scheduleBudgetChecks occurrences to wrap in require.main guard.');
-  }
+let entryRel = null;
+for (const c of candidates) {
+  const p = path.join(backendRoot, c);
+  if (fs.existsSync(p)) { entryRel = c; break; }
+}
+if (!entryRel) {
+  // fallback to server.js at root
+  entryRel = 'server.js';
+}
+const entryPath = path.join(backendRoot, entryRel);
+if (!fs.existsSync(entryPath)) {
+  console.error('Backend entry not found at expected path:', entryPath);
+  process.exit(1);
+}
+console.log('Backend entry detected at', entryPath);
 
-  // Find app.listen(...) occurrences
-  const listenRegex = /app\.listen\s*\([\s\S]*?\)\s*;?/g;
-  let listenMatches = src.match(listenRegex);
-  let listenBlock = '';
-  if (listenMatches) {
-    listenBlock = listenMatches.join('\n');
-    src = src.replace(listenRegex, '');
-    console.log('Removed app.listen occurrences to wrap in require.main guard.');
-  }
+// Read file
+let src = fs.readFileSync(entryPath, 'utf8');
 
-  // Create require.main guard that runs schedule and listen when module is main
-  const guardParts = [];
-  if (sbBlock) guardParts.push(sbBlock);
-  if (listenBlock) guardParts.push(listenBlock);
-  const guard = guardParts.length ? `\n\n// Start server and background jobs only when run directly\nif (require.main === module) {\n${guardParts.join('\n')}\n}\n` : '\n';
+// Helper to check presence
+const hasRequireMain = /require\.main\s*===\s*module/.test(src);
+const hasModuleExports = /module\.exports\s*=/.test(src);
 
-  src = src + guard;
-  console.log('Added require.main guard for startup code.');
+// If file already has both, we still try to ensure schedule/listen are guarded
+if (hasRequireMain && hasModuleExports) {
+  console.log('Entry already contains require.main guard and module.exports; will still attempt to guard app.listen()/schedule calls.');
 }
 
-// 3) Make sure file contains only one module.exports = app (we appended above if needed).
-// Save file
-fs.writeFileSync(found, src, 'utf8');
-console.log('Saved modified backend entry.');
+// 1) Remove or extract scheduleBudgetChecks calls and app.listen occurrences so we can wrap them safely.
+// We'll search for lines with scheduleBudgetChecks(...) and app.listen(...)
+// This is text-based and intentionally conservative: we match common patterns.
+
+let scheduleMatches = [];
+let listenMatches = [];
+
+// find schedule lines (simple heuristic)
+const scheduleRegex = /(^.*scheduleBudgetChecks\([^)]*\);?\s*$)/gim;
+let m;
+while ((m = scheduleRegex.exec(src)) !== null) scheduleMatches.push(m[1]);
+
+// find app.listen usages (multi-line tolerant)
+const listenRegex = /app\.listen\s*\([\s\S]*?\)\s*;?/gim;
+let lm;
+while ((lm = listenRegex.exec(src)) !== null) listenMatches.push(lm[0]);
+
+if (scheduleMatches.length > 0) {
+  console.log('Found scheduleBudgetChecks occurrences:', scheduleMatches.length);
+  scheduleMatches.forEach(s => { src = src.replace(s, ''); });
+}
+
+if (listenMatches.length > 0) {
+  console.log('Found app.listen occurrences:', listenMatches.length);
+  listenMatches.forEach(l => { src = src.replace(l, ''); });
+}
+
+// 2) Append module.exports = app if missing
+if (!/module\.exports\s*=\s*app\s*;?/.test(src)) {
+  src = src + '\n\n// Export app for serverless wrapper\ntry { if (typeof module !== "undefined") module.exports = app; } catch(e) {}\n';
+  console.log('App export appended.');
+}
+
+// 3) Add require.main guard that runs schedule and listen only when executed directly
+let guardBody = '';
+if (scheduleMatches.length > 0) guardBody += scheduleMatches.join('\n') + '\n';
+if (listenMatches.length > 0) guardBody += listenMatches.join('\n') + '\n';
+
+// If the original file already had a require.main guard, we will not duplicate it.
+// But even if it had, adding a guard at the end is OK because we removed existing occurrences.
+if (guardBody.trim().length > 0) {
+  const guardCode = `\n// Start server and background jobs only when run directly\nif (require.main === module) {\n${guardBody}\n}\n`;
+  src = src + guardCode;
+  console.log('Added require.main guard at file end.');
+} else {
+  console.log('No schedule or listen occurrences found to move into a require.main guard.');
+}
+
+// 4) Optionally stub OCR/native routes if requested (by checking STUB_OCR env variable)
+const stub = (process.env.STUB_OCR || 'false').toLowerCase();
+if (stub === 'true') {
+  console.log('STUB_OCR=true: attempting to stub routes that reference native binaries (pdf-poppler, tesseract).');
+  // A simple approach: replace route handlers that reference 'pdf-poppler' or 'tesseract' with a stub handler
+  // We'll do a small regex replace for occurrences like require('pdf-poppler') or require("tesseract.js")
+  src = src.replace(/require\(['"]pdf-poppler['"]\)/g, '/* pdf-poppler removed in CI stub */ null');
+  src = src.replace(/require\(['"]tesseract.js['"]\)/g, '/* tesseract.js removed in CI stub */ null');
+
+  // Also replace occurrences of spawn/exec of common binaries with a stub response in route handlers
+  // Example: look for functions that call res.send or res.status in handler where exec/spawn is used — too complex to be perfect,
+  // but we'll also add a fallback route near the end that returns 501 for known OCR endpoints if they are defined by path names.
+  const fallbackStub = `\n// CI-injected stub routes for OCR/pdf endpoints (return 501)\ntry{\n  const express = require('express');\n  if (typeof app === 'function' || (app && app.use)) {\n    try { app.post('/api/uploadPdf', (req, res) => res.status(501).json({ error: 'OCR disabled in serverless deploy (requires native binaries)' })); } catch(e) {}\n    try { app.post('/api/ocr', (req, res) => res.status(501).json({ error: 'OCR disabled in serverless deploy (requires native binaries)' })); } catch(e) {}\n  }\n} catch(e) {}\n`;
+  src = src + fallbackStub;
+  console.log('Added fallback stub routes for OCR endpoints.');
+}
+
+// 5) Save the modified file back
+fs.writeFileSync(entryPath, src, 'utf8');
+console.log('Patched backend entry saved to', entryPath);
+
+// 6) If backend package.json exists, ensure required fields are present (no edit - just logging)
+const backendPkgPath = path.join(backendRoot, 'package.json');
+if (fs.existsSync(backendPkgPath)) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(backendPkgPath, 'utf8'));
+    console.log('out/backend/package.json found with name:', pkg.name || '(no name)');
+  } catch(e) {
+    console.warn('Failed to parse out/backend/package.json', e.message);
+  }
+} else {
+  console.warn('out/backend/package.json not found; function deps may be incomplete.');
+}
 NODE
 
-          # --------------- create functions wrapper ---------------
+      - name: Create functions wrapper (serverless)
+        run: |
+          set -e
+          # Determine the entry (we look for the same candidates inside out/backend)
+          ENTRY="out/backend/server.js"
+          if [ -f out/backend/app.js ]; then ENTRY="out/backend/app.js"; fi
+          if [ -f out/backend/index.js ]; then ENTRY="out/backend/index.js"; fi
+          if [ -f out/backend/src/index.js ]; then ENTRY="out/backend/src/index.js"; fi
 
-          # We will create a CommonJS wrapper functions/server.js that requires the backend entry from out/backend
-          mkdir -p "$FUNCTIONS"
-          # sanitize require path (remove leading 'backend/' and .js)
-          REQ_PATH=$(echo "$ENTRY" | sed 's|^backend/||' | sed 's|\.js$||')
+          # Create CommonJS wrapper requiring the backend entry without .js extension
+          REQ=$(echo "$ENTRY" | sed 's|^out/||' | sed 's|\.js$||')
+          mkdir -p out/functions
+          echo "const serverless = require('serverless-http');" > out/functions/server.js
+          echo "let app = require('../${REQ}');" >> out/functions/server.js
+          echo "if (typeof app === 'function' && !app.use) app = app();" >> out/functions/server.js
+          echo "module.exports.handler = serverless(app);" >> out/functions/server.js
+          echo "Created out/functions/server.js wrapping ../${REQ}"
 
-          cat > "$FUNCTIONS/server.js" <<'CJS'
-const serverless = require('serverless-http');
-// Require the backend app from the bundled backend copy
-let app = require('../backend/REQ_REPLACE');
-// If the backend exports a function factory, call it
-if (typeof app === 'function' && !app.use) {
-  app = app();
-}
-// Export the handler for Netlify
-module.exports.handler = serverless(app);
-CJS
-
-          sed -i "s|REQ_REPLACE|backend/${REQ_PATH}|" "$FUNCTIONS/server.js"
-
-          # --------------- prepare out/package.json merging backend deps ---------------
+      - name: Generate merged out/package.json for function deps
+        run: |
+          set -e
           node - <<'NODE'
 const fs = require('fs');
 const path = require('path');
-const outPkg = { name: "money-map-netlify-out", private: true, version: "1.0.0", engines: { node: "18.x" }, dependencies: {}, devDependencies: {} };
+const outPkg = {
+  name: "money-map-netlify-out",
+  private: true,
+  version: "1.0.0",
+  engines: { node: "18.x" },
+  dependencies: {},
+  devDependencies: {}
+};
 const backendPkgPath = path.join('out','backend','package.json');
 if (fs.existsSync(backendPkgPath)) {
   try {
     const backendPkg = JSON.parse(fs.readFileSync(backendPkgPath,'utf8'));
-    outPkg.dependencies = Object.assign(outPkg.dependencies, backendPkg.dependencies || {});
-    outPkg.devDependencies = Object.assign(outPkg.devDependencies, backendPkg.devDependencies || {});
+    if (backendPkg.dependencies) {
+      Object.assign(outPkg.dependencies, backendPkg.dependencies);
+    }
+    if (backendPkg.devDependencies) {
+      Object.assign(outPkg.devDependencies, backendPkg.devDependencies);
+    }
   } catch(e) {
-    console.error('Failed to parse out/backend/package.json', e);
+    console.warn('Failed to parse out/backend/package.json:', e.message);
   }
+} else {
+  console.warn('out/backend/package.json not found; no backend dependencies were merged.');
 }
+// ensure serverless-http is available
 outPkg.dependencies['serverless-http'] = '^3.0.0';
+// Write final package.json
 fs.writeFileSync(path.join('out','package.json'), JSON.stringify(outPkg, null, 2));
-console.log('out/package.json created');
+console.log('Wrote out/package.json with dependencies:', Object.keys(outPkg.dependencies));
 NODE
-
-          echo "out/ prepared (publish + functions + backend copy)"
-          ls -la out | sed -n '1,200p'
 
       - name: Install dependencies in out/
         run: |
           set -e
           cd out
-          # Install only the dependencies required for the function (and serverless-http)
-          npm ci --no-audit --progress=false
+          # Prefer npm ci if package-lock exists, else npm install
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --progress=false
+          else
+            npm install --production --no-audit --progress=false
+          fi
 
-      - name: Install netlify-cli
+      - name: Install netlify-cli (global)
         run: |
-          cd out
-          npm i --no-save netlify-cli
+          npm install -g netlify-cli
 
-      - name: Deploy to Netlify (prod)
+      - name: Deploy out/ to Netlify (publish + functions)
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
         run: |
           set -e
-          cd out
-          # Ensure publish exists
-          if [ ! -d publish ]; then mkdir -p publish; fi
-          echo "Deploying publish/ (static) and functions/ to Netlify..."
-          npx netlify deploy \
+          # Ensure publish directory exists (Netlify requires a dir)
+          if [ ! -d out/publish ]; then mkdir -p out/publish; fi
+
+          # Deploy using netlify CLI
+          netlify deploy \
             --site="$NETLIFY_SITE_ID" \
             --auth="$NETLIFY_AUTH_TOKEN" \
-            --dir=publish \
-            --functions=functions \
+            --dir out/publish \
+            --functions out/functions \
             --prod
