@@ -1,0 +1,237 @@
+name: Build & Deploy Money-Map to Netlify (CI-only changes, no repo edits)
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      NODE_VERSION: 18
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Build frontend
+        run: |
+          set -e
+          if [ -d frontend ] && [ -f frontend/package.json ]; then
+            echo "Building frontend..."
+            cd frontend
+            npm ci
+            npm run build
+            cd -
+          else
+            echo "frontend folder/package.json not found; skipping frontend build"
+          fi
+
+      - name: Prepare out/ bundle (publish + functions) and copy backend
+        run: |
+          set -e
+          OUT=out
+          FUNCTIONS="$OUT/functions"
+          PUBLISH="$OUT/publish"
+
+          rm -rf "$OUT"
+          mkdir -p "$FUNCTIONS"
+          mkdir -p "$PUBLISH"
+
+          # Copy frontend build to publish/
+          if [ -d frontend/build ]; then
+            cp -r frontend/build/* "$PUBLISH/"
+          elif [ -d frontend/dist ]; then
+            cp -r frontend/dist/* "$PUBLISH/"
+          else
+            echo "No frontend/build or frontend/dist found; publish will be empty"
+          fi
+
+          # Copy backend to out/backend (we will only modify the copy)
+          if [ -d backend ]; then
+            cp -r backend "$OUT/backend"
+          else
+            echo "ERROR: backend folder not found in repo; aborting"
+            exit 1
+          fi
+
+          # Detect backend entry (common candidates) inside the copied out/backend
+          ENTRY=""
+          for cand in backend/app.js backend/index.js backend/server.js backend/src/index.js; do
+            if [ -f "$OUT/$cand" ]; then
+              ENTRY="$cand"
+              break
+            fi
+          done
+
+          if [ -z "$ENTRY" ]; then
+            echo "Could not detect backend entry automatically. Defaulting to backend/server.js"
+            ENTRY="backend/server.js"
+          fi
+          echo "Detected backend entry: $ENTRY"
+
+          # --------------- modify copied backend/server.js (only in out/) to be serverless-friendly ---------------
+          # We'll:
+          #  - wrap scheduleBudgetChecks() and app.listen(...) inside `if (require.main === module) { ... }`
+          #  - export app: module.exports = app;
+          #
+          # We do this with a Node script that edits the file robustly.
+
+          node <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const outRoot = path.resolve('out');
+const candidates = [
+  'backend/app.js',
+  'backend/index.js',
+  'backend/server.js',
+  'backend/src/index.js'
+];
+let found = null;
+for (const c of candidates) {
+  const p = path.join(outRoot, c);
+  if (fs.existsSync(p)) { found = p; break; }
+}
+if (!found) {
+  // fallback to server.js path
+  found = path.join(outRoot, 'backend', 'server.js');
+}
+console.log('Modifying backend entry at:', found);
+if (!fs.existsSync(found)) {
+  console.error('Backend entry not found at expected path:', found);
+  process.exit(1);
+}
+let src = fs.readFileSync(found, 'utf8');
+
+// If file already exports app or has require.main guard, skip heavy edits
+if (src.includes('module.exports') && src.includes('require.main')) {
+  console.log('Backend entry already has module.exports and require.main guard; minimal edits only.');
+} else {
+  // 1) Ensure we export `app` at end.
+  if (!/module\.exports\s*=\s*app/.test(src)) {
+    // Add export at the end but before any trailing comments
+    src = src + '\n\n// Export app for serverless wrapper\nif (typeof module !== "undefined") module.exports = app;\n';
+    console.log('App export appended.');
+  }
+
+  // 2) Wrap scheduleBudgetChecks() and app.listen(...) inside require.main guard if present
+  // Find scheduleBudgetChecks() calls (common pattern) and replace them with a placeholder to move inside guard.
+  const sbRegex = /([^\n]*scheduleBudgetChecks\([^)]*\);?)/g;
+  let sbMatches = src.match(sbRegex);
+  let sbBlock = '';
+  if (sbMatches) {
+    sbBlock = sbMatches.join('\n');
+    src = src.replace(sbRegex, '');
+    console.log('Removed scheduleBudgetChecks occurrences to wrap in require.main guard.');
+  }
+
+  // Find app.listen(...) occurrences
+  const listenRegex = /app\.listen\s*\([\s\S]*?\)\s*;?/g;
+  let listenMatches = src.match(listenRegex);
+  let listenBlock = '';
+  if (listenMatches) {
+    listenBlock = listenMatches.join('\n');
+    src = src.replace(listenRegex, '');
+    console.log('Removed app.listen occurrences to wrap in require.main guard.');
+  }
+
+  // Create require.main guard that runs schedule and listen when module is main
+  const guardParts = [];
+  if (sbBlock) guardParts.push(sbBlock);
+  if (listenBlock) guardParts.push(listenBlock);
+  const guard = guardParts.length ? `\n\n// Start server and background jobs only when run directly\nif (require.main === module) {\n${guardParts.join('\n')}\n}\n` : '\n';
+
+  src = src + guard;
+  console.log('Added require.main guard for startup code.');
+}
+
+// 3) Make sure file contains only one module.exports = app (we appended above if needed).
+// Save file
+fs.writeFileSync(found, src, 'utf8');
+console.log('Saved modified backend entry.');
+NODE
+
+          # --------------- create functions wrapper ---------------
+
+          # We will create a CommonJS wrapper functions/server.js that requires the backend entry from out/backend
+          mkdir -p "$FUNCTIONS"
+          # sanitize require path (remove leading 'backend/' and .js)
+          REQ_PATH=$(echo "$ENTRY" | sed 's|^backend/||' | sed 's|\.js$||')
+
+          cat > "$FUNCTIONS/server.js" <<'CJS'
+const serverless = require('serverless-http');
+// Require the backend app from the bundled backend copy
+let app = require('../backend/REQ_REPLACE');
+// If the backend exports a function factory, call it
+if (typeof app === 'function' && !app.use) {
+  app = app();
+}
+// Export the handler for Netlify
+module.exports.handler = serverless(app);
+CJS
+
+          sed -i "s|REQ_REPLACE|backend/${REQ_PATH}|" "$FUNCTIONS/server.js"
+
+          # --------------- prepare out/package.json merging backend deps ---------------
+          node <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const outPkg = { name: "money-map-netlify-out", private: true, version: "1.0.0", engines: { node: "18.x" }, dependencies: {}, devDependencies: {} };
+const backendPkgPath = path.join('out','backend','package.json');
+if (fs.existsSync(backendPkgPath)) {
+  try {
+    const backendPkg = JSON.parse(fs.readFileSync(backendPkgPath,'utf8'));
+    outPkg.dependencies = Object.assign(outPkg.dependencies, backendPkg.dependencies || {});
+    outPkg.devDependencies = Object.assign(outPkg.devDependencies, backendPkg.devDependencies || {});
+  } catch(e) {
+    console.error('Failed to parse out/backend/package.json', e);
+  }
+}
+outPkg.dependencies['serverless-http'] = '^3.0.0';
+fs.writeFileSync(path.join('out','package.json'), JSON.stringify(outPkg, null, 2));
+console.log('out/package.json created');
+NODE
+
+          echo "out/ prepared (publish + functions + backend copy)"
+          ls -la out | sed -n '1,200p'
+
+      - name: Install dependencies in out/
+        run: |
+          set -e
+          cd out
+          # Install only the dependencies required for the function (and serverless-http)
+          npm ci --no-audit --progress=false
+
+      - name: Install netlify-cli
+        run: |
+          cd out
+          npm i --no-save netlify-cli
+
+      - name: Deploy to Netlify (prod)
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          set -e
+          cd out
+          # Ensure publish exists
+          if [ ! -d publish ]; then mkdir -p publish; fi
+          echo "Deploying publish/ (static) and functions/ to Netlify..."
+          npx netlify deploy \
+            --site="$NETLIFY_SITE_ID" \
+            --auth="$NETLIFY_AUTH_TOKEN" \
+            --dir=publish \
+            --functions=functions \
+            --prod
