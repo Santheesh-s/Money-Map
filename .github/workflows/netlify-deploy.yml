@@ -6,7 +6,7 @@ on:
 
 env:
   NODE_VERSION: 18
-  # Set to "true" to stub OCR endpoints in CI if native binaries are used
+  # Set to "true" to stub OCR endpoints if native binaries are used
   STUB_OCR: "false"
 
 jobs:
@@ -78,7 +78,6 @@ jobs:
             ENTRY="server.js"
           fi
           echo "Detected entry: $ENTRY"
-          # Set output in the modern way
           echo "entry=$ENTRY" >> "$GITHUB_OUTPUT"
 
       - name: Patch copied backend to be serverless-safe (no heredocs)
@@ -98,7 +97,6 @@ jobs:
           # 1) Remove lines that call scheduleBudgetChecks(...) (heuristic)
           if grep -qi "scheduleBudgetChecks" "${ENTRY_PATH}"; then
             echo "Removing scheduleBudgetChecks() lines"
-            # Remove any line that contains scheduleBudgetChecks(
             sed -i.bak '/scheduleBudgetChecks\s*(/I d' "${ENTRY_PATH}" || true
           else
             echo "No scheduleBudgetChecks occurrences"
@@ -144,36 +142,14 @@ jobs:
           echo "module.exports.handler = serverless(app);" >> out/functions/server.js
           echo "Created out/functions/server.js requiring ../${REQ}"
 
-      - name: Build merged out/package.json from backend/package.json
+      - name: Build merged out/package.json from backend/package.json (heredoc-free)
         run: |
           set -e
-          node - <<'NODE'
-const fs = require('fs');
-const path = require('path');
-const outPkg = {
-  name: 'money-map-netlify-out',
-  private: true,
-  version: '1.0.0',
-  engines: { node: '18.x' },
-  dependencies: {},
-  devDependencies: {}
-};
-const backendPkgPath = path.join('out','backend','package.json');
-if (fs.existsSync(backendPkgPath)) {
-  try {
-    const backendPkg = JSON.parse(fs.readFileSync(backendPkgPath,'utf8'));
-    if (backendPkg.dependencies) Object.assign(outPkg.dependencies, backendPkg.dependencies);
-    if (backendPkg.devDependencies) Object.assign(outPkg.devDependencies, backendPkg.devDependencies);
-  } catch(e) {
-    console.warn('Failed to parse backend package.json:', e.message);
-  }
-} else {
-  console.warn('out/backend/package.json not found; no backend dependencies merged.');
-}
-outPkg.dependencies['serverless-http'] = '^3.0.0';
-fs.writeFileSync(path.join('out','package.json'), JSON.stringify(outPkg, null, 2));
-console.log('Wrote out/package.json');
-NODE
+          # create a temporary JS file that will write out/package.json (no heredoc in YAML)
+          TMPFILE="$(mktemp)"
+          printf "const fs=require('fs');\nconst path=require('path');\nconst outPkg={name:'money-map-netlify-out',private:true,version:'1.0.0',engines:{node:'18.x'},dependencies:{},devDependencies:{}};\nconst backendPkgPath=path.join('out','backend','package.json');\nif (fs.existsSync(backendPkgPath)){\n  try{const backendPkg=JSON.parse(fs.readFileSync(backendPkgPath,'utf8'));\n    if(backendPkg.dependencies) Object.assign(outPkg.dependencies, backendPkg.dependencies);\n    if(backendPkg.devDependencies) Object.assign(outPkg.devDependencies, backendPkg.devDependencies);\n  }catch(e){console.warn('Failed to parse backend package.json',e.message)}\n} else { console.warn('out/backend/package.json not found'); }\noutPkg.dependencies['serverless-http']='^3.0.0';\nfs.writeFileSync(path.join('out','package.json'), JSON.stringify(outPkg,null,2));\nconsole.log('Wrote out/package.json');\n" > "$TMPFILE"
+          node "$TMPFILE"
+          rm -f "$TMPFILE"
 
       - name: Install dependencies in out/
         run: |
